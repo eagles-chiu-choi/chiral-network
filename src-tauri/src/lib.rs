@@ -11,3 +11,6 @@ pub mod file_transfer;
 // Required modules for encryption and keystore functionality
 pub mod encryption;
 pub mod keystore;
+
+// Reputation system
+pub mod reputation;
