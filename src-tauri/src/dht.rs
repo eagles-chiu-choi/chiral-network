@@ -3491,6 +3491,9 @@ async fn run_dht_node(
                             SwarmEvent::Behaviour(DhtBehaviourEvent::Dcutr(ev)) => {
                                 handle_dcutr_event(ev, &metrics, &event_tx).await;
                             }
+                            SwarmEvent::Behaviour(DhtBehaviourEvent::Upnp(upnp_event)) => {
+                                handle_upnp_event(upnp_event, &mut swarm, &event_tx).await;
+                            }
                             SwarmEvent::ExternalAddrConfirmed { address, .. } => {
                                 handle_external_addr_confirmed(&address, &metrics, &event_tx, &proxy_mgr)
                                     .await;
@@ -4778,6 +4781,62 @@ async fn handle_dcutr_event(
                     "✗ Direct connection upgrade to peer {} failed: {}",
                     remote_peer_id, error
                 )))
+                .await;
+        }
+    }
+}
+
+async fn handle_upnp_event(
+    event: upnp::Event,
+    swarm: &mut Swarm<DhtBehaviour>,
+    event_tx: &mpsc::Sender<DhtEvent>,
+) {
+    match event {
+        upnp::Event::NewExternalAddr(addr) => {
+            info!("🌐 UPnP: Successfully mapped external address: {}", addr);
+            
+            // Add the external address to the swarm
+            swarm.add_external_address(addr.clone());
+            
+            // Notify the UI
+            let _ = event_tx
+                .send(DhtEvent::Info(format!(
+                    "✓ UPnP port mapping successful: {}",
+                    addr
+                )))
+                .await;
+        }
+        upnp::Event::ExpiredExternalAddr(addr) => {
+            warn!("⏰ UPnP: External address expired: {}", addr);
+            
+            let _ = event_tx
+                .send(DhtEvent::Warning(format!(
+                    "UPnP port mapping expired: {}",
+                    addr
+                )))
+                .await;
+        }
+        upnp::Event::GatewayNotFound => {
+            warn!("⚠️  UPnP: No UPnP gateway found on network");
+            warn!("    - Make sure your router supports UPnP/IGD");
+            warn!("    - Check if UPnP is enabled in router settings");
+            warn!("    - Falling back to relay connections");
+            
+            let _ = event_tx
+                .send(DhtEvent::Info(
+                    "UPnP not available - using relay for NAT traversal".to_string()
+                ))
+                .await;
+        }
+        upnp::Event::NonRoutableGateway => {
+            warn!("⚠️  UPnP: Gateway is not routable");
+            warn!("    - Your router may be behind another NAT (carrier-grade NAT)");
+            warn!("    - Direct connections may not be possible");
+            
+            let _ = event_tx
+                .send(DhtEvent::Warning(
+                    "UPnP gateway not routable - behind CGNAT?".to_string()
+                ))
                 .await;
         }
     }
