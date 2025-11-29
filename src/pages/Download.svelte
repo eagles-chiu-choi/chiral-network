@@ -515,7 +515,7 @@ const unlistenWebRTCComplete = await listen('webrtc_download_complete', async (e
           downloadedSize: transfer.downloadedBytes,
           totalChunks: transfer.totalChunks,
           completedChunks: transfer.completedChunks,
-          activeSourceCount: transfer.activeSources,
+          activeSources: transfer.activeSources,
           downloadSpeedBps: transfer.downloadSpeedBps,
           etaSeconds: transfer.etaSeconds,
           sourceAssignments: []
@@ -530,7 +530,7 @@ const unlistenWebRTCComplete = await listen('webrtc_download_complete', async (e
           existing.completedChunks = transfer.completedChunks;
           existing.downloadSpeedBps = transfer.downloadSpeedBps;
           existing.etaSeconds = transfer.etaSeconds;
-          existing.activeSourceCount = transfer.activeSources;
+          existing.activeSources = transfer.activeSources;
           multiSourceProgress = multiSourceProgress; // Trigger reactivity
         }
       }
