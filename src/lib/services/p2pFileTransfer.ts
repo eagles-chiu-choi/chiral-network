@@ -12,12 +12,12 @@ export interface P2PTransfer {
   seeders: string[];
   progress: number;
   status:
-    | "connecting"
-    | "transferring"
-    | "completed"
-    | "failed"
-    | "cancelled"
-    | "retrying";
+  | "connecting"
+  | "transferring"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "retrying";
   bytesTransferred: number;
   speed: number;
   eta?: number;
@@ -36,6 +36,7 @@ export interface P2PTransfer {
   streamingSessionId?: string;
   receivedChunkIndices?: Set<number>; // Track which chunks received (not the data)
   chunkSize: number;
+  chunkRequestTimes?: Map<number, number>; // Track when each chunk was requested for timeout logic
 }
 
 export class P2PFileTransferService {
@@ -83,6 +84,7 @@ export class P2PFileTransferService {
       speed: 0,
       startTime: Date.now(),
       chunkSize: P2PFileTransferService.CHUNK_SIZE,
+      chunkRequestTimes: new Map(),
     };
 
     this.transfers.set(transferId, transfer);
@@ -138,6 +140,7 @@ export class P2PFileTransferService {
     transfer.corruptedChunks = new Set();
     transfer.requestedChunks = new Set();
     transfer.receivedChunkIndices = new Set();
+    transfer.chunkRequestTimes = new Map();
     // Note: Streaming session is initialized after manifest response for accurate chunk count
 
     // Connect to signaling service if not connected
@@ -220,7 +223,7 @@ export class P2PFileTransferService {
               );
             }
           },
-          onDataChannelOpen: () => {},
+          onDataChannelOpen: () => { },
           onMessage: async (data) => {
             await this.handleIncomingChunk(transfer, data);
           },
@@ -550,6 +553,9 @@ export class P2PFileTransferService {
         return;
       }
 
+      // Check for stalled chunks before requesting new ones
+      this.checkForStalledChunks(transfer);
+
       const receivedCount = transfer.receivedChunks?.size || 0;
       const requestedCount = this.getRequestedChunkCount(transfer);
 
@@ -600,12 +606,30 @@ export class P2PFileTransferService {
 
       // Track that we've requested this chunk
       transfer.requestedChunks?.add(chunkIndex);
+      transfer.chunkRequestTimes?.set(chunkIndex, Date.now());
 
       transfer.webrtcSession.send(JSON.stringify(chunkRequest));
     } catch (error) {
       console.error(`Failed to request chunk ${chunkIndex}:`, error);
       // Remove from requested if send failed
       transfer.requestedChunks?.delete(chunkIndex);
+      transfer.chunkRequestTimes?.delete(chunkIndex);
+    }
+  }
+
+  private checkForStalledChunks(transfer: P2PTransfer): void {
+    if (!transfer.chunkRequestTimes || !transfer.requestedChunks) return;
+
+    const now = Date.now();
+    const TIMEOUT_MS = 5000; // 5 seconds timeout
+
+    for (const [chunkIndex, requestTime] of transfer.chunkRequestTimes.entries()) {
+      if (now - requestTime > TIMEOUT_MS) {
+        console.warn(`Chunk ${chunkIndex} timed out after ${now - requestTime}ms. Resetting.`);
+        // Remove from tracking so it can be re-requested
+        transfer.requestedChunks.delete(chunkIndex);
+        transfer.chunkRequestTimes.delete(chunkIndex);
+      }
     }
   }
 
@@ -727,6 +751,7 @@ export class P2PFileTransferService {
 
         // Remove from requested chunks since it's now received
         transfer.requestedChunks?.delete(chunkIndex);
+        transfer.chunkRequestTimes?.delete(chunkIndex);
 
         // Remove from corrupted chunks if it was previously corrupted
         transfer.corruptedChunks?.delete(chunkIndex);

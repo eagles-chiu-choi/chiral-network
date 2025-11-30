@@ -9,22 +9,22 @@ use aes_gcm::{AeadCore, KeyInit};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::bytes::Bytes;
-use tauri::Emitter;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, Duration};
+use tracing::{error, info, warn};
+use tauri::Emitter;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::api::APIBuilder;
 
 const CHUNK_SIZE: usize = 4096; // 4KB chunks - safe size for WebRTC data channel max message size (~16KB after JSON serialization)
 
@@ -55,6 +55,7 @@ fn create_rtc_configuration() -> RTCConfiguration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebRTCFileRequest {
     pub file_hash: String,
     pub file_name: String,
@@ -65,18 +66,21 @@ pub struct WebRTCFileRequest {
 
 /// Sent by a downloader to request the full file manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebRTCManifestRequest {
     pub file_hash: String, // The Merkle Root
 }
 
 /// Sent by a seeder in response to a manifest request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebRTCManifestResponse {
     pub file_hash: String,     // The Merkle Root, to match the request
     pub manifest_json: String, // The full FileManifest, serialized to JSON
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileChunk {
     pub file_hash: String,
     pub chunk_index: u32,
@@ -204,6 +208,7 @@ pub enum WebRTCEvent {
 
 /// ACK message sent by downloader to confirm chunk receipt
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChunkAck {
     pub file_hash: String,
     pub chunk_index: u32,
@@ -212,7 +217,7 @@ pub struct ChunkAck {
 
 /// A new enum to wrap different message types for clarity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum WebRTCMessage {
     FileRequest(WebRTCFileRequest),
     ManifestRequest(WebRTCManifestRequest),
@@ -1430,53 +1435,53 @@ impl WebRTCService {
     }
 
     async fn assemble_file_from_chunks(
-    file_hash: &str,
-    chunks: &HashMap<u32, FileChunk>,
-    file_transfer_service: &Arc<FileTransferService>,
-    event_tx: &mpsc::Sender<WebRTCEvent>,
-    peer_id: &str,
-    app_handle: &tauri::AppHandle, // Add this parameter
+        file_hash: &str,
+        chunks: &HashMap<u32, FileChunk>,
+        file_transfer_service: &Arc<FileTransferService>,
+        event_tx: &mpsc::Sender<WebRTCEvent>,
+        peer_id: &str,
+        app_handle: &tauri::AppHandle,
     ) {
-    // Sort chunks by index
-    let mut sorted_chunks: Vec<_> = chunks.values().collect();
-    sorted_chunks.sort_by_key(|c| c.chunk_index);
+        // Sort chunks by index
+        let mut sorted_chunks: Vec<_> = chunks.values().collect();
+        sorted_chunks.sort_by_key(|c| c.chunk_index);
 
-    // Get file name from the first chunk
-    let file_name = sorted_chunks
-        .first()
-        .map(|c| c.file_hash.clone())
-        .unwrap_or_else(|| format!("downloaded_{}", file_hash));
+        // Get file name from the first chunk
+        let file_name = sorted_chunks
+            .first()
+            .map(|c| c.file_hash.clone())
+            .unwrap_or_else(|| format!("downloaded_{}", file_hash));
 
-    // Concatenate chunk data
-    let mut file_data = Vec::new();
-    for chunk in sorted_chunks {
-        file_data.extend_from_slice(&chunk.data);
+        // Concatenate chunk data
+        let mut file_data = Vec::new();
+        for chunk in sorted_chunks {
+            file_data.extend_from_slice(&chunk.data);
+        }
+
+        let file_size = file_data.len();
+
+        // Store the assembled file internally
+        file_transfer_service
+            .store_file_data(file_hash.to_string(), file_name.clone(), file_data.clone())
+            .await;
+
+        // Emit event to frontend with complete file data
+        if let Err(e) = app_handle.emit("webrtc_download_complete", serde_json::json!({
+            "fileHash": file_hash,
+            "fileName": file_name,
+            "fileSize": file_size,
+            "data": file_data, // Send the actual file data
+        })) {
+            error!("Failed to emit webrtc_download_complete event: {}", e);
+        }
+
+        let _ = event_tx
+            .send(WebRTCEvent::TransferCompleted {
+                peer_id: peer_id.to_string(),
+                file_hash: file_hash.to_string(),
+            })
+            .await;
     }
-
-    let file_size = file_data.len();
-
-    // Store the assembled file internally
-    file_transfer_service
-        .store_file_data(file_hash.to_string(), file_name.clone(), file_data.clone())
-        .await;
-
-    // NEW: Emit event to frontend with complete file data
-    if let Err(e) = app_handle.emit("webrtc_download_complete", serde_json::json!({
-        "fileHash": file_hash,
-        "fileName": file_name,
-        "fileSize": file_size,
-        "data": file_data, // Send the actual file data
-    })) {
-        error!("Failed to emit webrtc_download_complete event: {}", e);
-    }
-
-    let _ = event_tx
-        .send(WebRTCEvent::TransferCompleted {
-            peer_id: peer_id.to_string(),
-            file_hash: file_hash.to_string(),
-        })
-        .await;
-}
 
     fn calculate_chunk_checksum(data: &[u8]) -> String {
         let mut hasher = Sha256::default();
