@@ -2206,6 +2206,24 @@ async fn run_dht_node(
                                             }
                                         }
 
+                                        // Check if already connected before dialing
+                                        if swarm.is_connected(&peer_id) {
+                                            info!("Peer {} already connected, skipping dial", peer_id);
+                                            let _ = event_tx
+                                                .send(DhtEvent::PeerConnected {
+                                                    peer_id: peer_id.to_string(),
+                                                    address: Some(multiaddr.to_string()),
+                                                })
+                                                .await;
+                                            continue;
+                                        }
+                                        
+                                        // Filter out invalid addresses
+                                        if !ma_plausibly_reachable(&multiaddr) {
+                                            warn!("Address {} is not plausibly reachable, skipping", multiaddr);
+                                            continue;
+                                        }
+
                                         match swarm.dial(multiaddr.clone()) {
                                             Ok(_) => {
                                                 info!("Requested direct connection to: {}", addr);
@@ -2213,10 +2231,28 @@ async fn run_dht_node(
                                                 info!("  Waiting for ConnectionEstablished event...");
                                             }
                                             Err(e) => {
-                                                error!("Failed to dial {}: {}", addr, e);
-                                                let _ = event_tx
-                                                    .send(DhtEvent::Error(format!("Failed to connect: {}", e)))
-                                                    .await;
+                                                let error_str = e.to_string();
+                                                // Don't error for duplicate connection attempts
+                                                if error_str.contains("10048") 
+                                                    || error_str.contains("address already in use")
+                                                    || error_str.contains("already dialing")
+                                                    || error_str.contains("already connected") {
+                                                    debug!("Connection to {} already in progress or connected", peer_id);
+                                                    // Check if actually connected now
+                                                    if swarm.is_connected(&peer_id) {
+                                                        let _ = event_tx
+                                                            .send(DhtEvent::PeerConnected {
+                                                                peer_id: peer_id.to_string(),
+                                                                address: Some(multiaddr.to_string()),
+                                                            })
+                                                            .await;
+                                                    }
+                                                } else {
+                                                    error!("Failed to dial {}: {}", addr, e);
+                                                    let _ = event_tx
+                                                        .send(DhtEvent::Error(format!("Failed to connect: {}", e)))
+                                                        .await;
+                                                }
                                             }
                                         }
                                     } else {
@@ -4405,43 +4441,86 @@ async fn handle_kademlia_event(
                         // Attempt to connect to the discovered peers
                         let mut connection_attempts = 0;
                         for peer_info in &peers {
-                            // Check if this peer is already connected
-                            let is_connected = {
+                            // Check if this peer is already connected using swarm's actual state
+                            // This is more reliable than just checking connected_peers HashSet
+                            if swarm.is_connected(&peer_info.peer_id) {
+                                info!("Peer {} is already connected (checked via swarm)", peer_info.peer_id);
+                                continue;
+                            }
+                            
+                            // Also check our local tracking for consistency
+                            let is_connected_tracked = {
                                 let connected = connected_peers.lock().await;
                                 connected.contains(&peer_info.peer_id)
                             };
-
-                            if is_connected {
-                                info!("Peer {} is already connected", peer_info.peer_id);
-                                continue;
+                            
+                            if is_connected_tracked && !swarm.is_connected(&peer_info.peer_id) {
+                                // State mismatch - remove from tracking
+                                let mut connected = connected_peers.lock().await;
+                                connected.remove(&peer_info.peer_id);
                             }
 
                             // Try to connect using available addresses
                             let mut connected = false;
                             for addr in &peer_info.addrs {
-                                if ma_plausibly_reachable(addr) {
-                                    info!(
-                                        "Attempting to connect to peer {} at {}",
-                                        peer_info.peer_id, addr
-                                    );
-                                    // Add address to Kademlia routing table
-                                    swarm
-                                        .behaviour_mut()
-                                        .kademlia
-                                        .add_address(&peer_info.peer_id, addr.clone());
+                                // Filter out invalid addresses (e.g., /p2p/... only)
+                                if !ma_plausibly_reachable(addr) {
+                                    continue;
+                                }
+                                
+                                // Check if address has IP (not just /p2p/...)
+                                let has_ip = addr.iter().any(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_)));
+                                if !has_ip {
+                                    debug!("Skipping address without IP: {}", addr);
+                                    continue;
+                                }
+                                
+                                // Double-check connection state before dialing
+                                if swarm.is_connected(&peer_info.peer_id) {
+                                    info!("Peer {} became connected, skipping dial", peer_info.peer_id);
+                                    connected = true;
+                                    break;
+                                }
 
-                                    // Attempt direct connection
-                                    match swarm.dial(addr.clone()) {
-                                        Ok(_) => {
-                                            info!(
-                                                "✅ Initiated connection to peer {} at {}",
+                                info!(
+                                    "Attempting to connect to peer {} at {}",
+                                    peer_info.peer_id, addr
+                                );
+                                // Add address to Kademlia routing table
+                                swarm
+                                    .behaviour_mut()
+                                    .kademlia
+                                    .add_address(&peer_info.peer_id, addr.clone());
+
+                                // Attempt direct connection
+                                match swarm.dial(addr.clone()) {
+                                    Ok(_) => {
+                                        info!(
+                                            "✅ Initiated connection to peer {} at {}",
+                                            peer_info.peer_id, addr
+                                        );
+                                        connected = true;
+                                        connection_attempts += 1;
+                                        break; // Successfully initiated connection, no need to try other addresses
+                                    }
+                                    Err(e) => {
+                                        // Check if error is due to duplicate connection attempt
+                                        let error_str = e.to_string();
+                                        if error_str.contains("10048") 
+                                            || error_str.contains("address already in use")
+                                            || error_str.contains("already dialing")
+                                            || error_str.contains("already connected") {
+                                            debug!(
+                                                "Connection to {} at {} already in progress or connected, skipping",
                                                 peer_info.peer_id, addr
                                             );
-                                            connected = true;
-                                            connection_attempts += 1;
-                                            break; // Successfully initiated connection, no need to try other addresses
-                                        }
-                                        Err(e) => {
+                                            // Check if actually connected now
+                                            if swarm.is_connected(&peer_info.peer_id) {
+                                                connected = true;
+                                                break;
+                                            }
+                                            // Don't break - try next address
+                                        } else {
                                             debug!(
                                                 "Failed to dial peer {} at {}: {}",
                                                 peer_info.peer_id, addr, e
@@ -4853,6 +4932,19 @@ async fn handle_mdns_event(
                 if peer_id == *local_peer_id {
                     continue;
                 }
+                
+                // Check if already connected before dialing
+                if swarm.is_connected(&peer_id) {
+                    debug!("mDNS: Peer {} already connected, skipping dial", peer_id);
+                    continue;
+                }
+                
+                // Filter out invalid addresses (e.g., /p2p/... only)
+                if !ma_plausibly_reachable(&multiaddr) {
+                    debug!("mDNS: Skipping unreachable address: {}", multiaddr);
+                    continue;
+                }
+                
                 match swarm.dial(multiaddr.clone()) {
                     Ok(_) => {
                         swarm
@@ -4864,7 +4956,16 @@ async fn handle_mdns_event(
                             .or_insert_with(Vec::new)
                             .push(multiaddr.to_string());
                     }
-                    Err(e) => warn!("✗ Failed to dial bootstrap {}: {}", multiaddr, e),
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        // Don't warn for duplicate connection attempts
+                        if !error_str.contains("10048") 
+                            && !error_str.contains("address already in use")
+                            && !error_str.contains("already dialing")
+                            && !error_str.contains("already connected") {
+                            warn!("✗ Failed to dial mDNS peer {}: {}", multiaddr, e);
+                        }
+                    }
                 }
             }
             for (peer_id, addresses) in discovered {
@@ -7318,10 +7419,22 @@ fn ipv4_in_same_subnet(target: Ipv4Addr, iface_ip: Ipv4Addr, iface_mask: Ipv4Add
 /// - IPv4 loopback (127.0.0.1) is REJECTED (not reachable from remote peers)
 /// - For WAN intent, only public IPv4 addresses are allowed (not private ranges)
 fn ma_plausibly_reachable(ma: &Multiaddr) -> bool {
-    // Relay paths are allowed
+    // Relay paths are allowed (but must have IP before circuit)
     if ma.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        // Check if there's an IP address before the circuit
+        let has_ip = ma.iter().any(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_)));
+        if !has_ip {
+            return false; // /p2p/.../p2p-circuit without IP is invalid
+        }
         return true;
     }
+    
+    // Reject addresses that only have /p2p/... without IP
+    let has_ip = ma.iter().any(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_)));
+    if !has_ip {
+        return false; // /p2p/... only is not reachable
+    }
+    
     // Only consider IPv4 (IPv6 can be added if needed)
     if let Some(Protocol::Ip4(v4)) = ma.iter().find(|p| matches!(p, Protocol::Ip4(_))) {
         // Reject loopback addresses - they're not reachable from remote peers
