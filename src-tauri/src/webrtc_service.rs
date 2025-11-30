@@ -33,6 +33,10 @@ const CHUNK_SIZE: usize = 4096; // 4KB chunks - safe size for WebRTC data channe
 
 /// Creates a WebRTC configuration with public STUN servers for NAT traversal.
 /// Without ICE servers, WebRTC connections will fail for users behind NAT (majority of users).
+/// 
+/// IMPORTANT: For same-NAT scenarios, WebRTC will automatically prioritize host candidates
+/// (local network IPs) over server-reflexive candidates (STUN-discovered IPs).
+/// This ensures optimal performance when peers are on the same local network.
 fn create_rtc_configuration() -> RTCConfiguration {
     RTCConfiguration {
         ice_servers: vec![
@@ -53,6 +57,11 @@ fn create_rtc_configuration() -> RTCConfiguration {
                 ..Default::default()
             },
         ],
+        // Note: webrtc-rs automatically handles ICE candidate priority:
+        // - Host candidates (local IPs) get highest priority
+        // - Server-reflexive candidates (STUN) get medium priority  
+        // - Relay candidates get lowest priority
+        // This ensures same-NAT peers connect directly via local network
         ..Default::default()
     }
 }
@@ -454,9 +463,19 @@ impl WebRTCService {
 
             Box::pin(async move {
                 if let Some(candidate) = candidate {
-                    if let Ok(candidate_str) =
-                        serde_json::to_string(&candidate.to_json().unwrap_or_default())
-                    {
+                    // Log candidate type for debugging same-NAT scenarios
+                    let candidate_json = candidate.to_json().unwrap_or_default();
+                    
+                    // Check candidate type from the candidate string field
+                    let cand_str = &candidate_json.candidate;
+                    // Check if this is a host candidate (local network)
+                    if cand_str.contains("typ host") {
+                        info!("🌐 Local network ICE candidate for peer {}: {}", peer_id, cand_str);
+                    } else if cand_str.contains("typ srflx") {
+                        info!("🌍 STUN-reflexive ICE candidate for peer {}: {}", peer_id, cand_str);
+                    }
+                    
+                    if let Ok(candidate_str) = serde_json::to_string(&candidate_json) {
                         let _ = event_tx
                             .send(WebRTCEvent::IceCandidate {
                                 peer_id,
@@ -846,52 +865,11 @@ impl WebRTCService {
         bandwidth: Arc<BandwidthController>,
     ) {
         if let Ok(text) = std::str::from_utf8(&msg.data) {
-            // Try to parse as FileChunk
-            if let Ok(chunk) = serde_json::from_str::<FileChunk>(text) {
-                // Handle received chunk
-                Self::process_incoming_chunk(
-                    &chunk,
-                    file_transfer_service,
-                    connections,
-                    event_tx,
-                    peer_id,
-                    keystore,
-                    &active_private_key,
-                    stream_auth,
-                    &app_handle,
-                    &bandwidth,
-                )
-                .await;
-                let _ = event_tx
-                    .send(WebRTCEvent::FileChunkReceived {
-                        peer_id: peer_id.to_string(),
-                        chunk,
-                    })
-                    .await;
-            }
-            // Try to parse as WebRTCFileRequest
-            else if let Ok(request) = serde_json::from_str::<WebRTCFileRequest>(text) {
-                let _ = event_tx
-                    .send(WebRTCEvent::FileRequestReceived {
-                        peer_id: peer_id.to_string(),
-                        request: request.clone(),
-                    })
-                    .await;
-                // Actually handle the file request to start transfer
-                Self::handle_file_request(
-                    peer_id,
-                    &request,
-                    event_tx,
-                    file_transfer_service,
-                    connections,
-                    keystore,
-                    stream_auth,
-                    &bandwidth,
-                )
-                .await;
-            }
-            // Try to parse as a generic WebRTCMessage
-            else if let Ok(message) = serde_json::from_str::<WebRTCMessage>(text) {
+            // IMPORTANT: Parse WebRTCMessage FIRST to handle ChunkAck correctly
+            // ChunkAck must be processed before FileChunk to avoid parsing conflicts
+            let mut handled = false;
+            if let Ok(message) = serde_json::from_str::<WebRTCMessage>(text) {
+                handled = true;
                 match message {
                     WebRTCMessage::FileRequest(request) => {
                         let _ = event_tx
@@ -1055,10 +1033,65 @@ impl WebRTCService {
                                 }
                             }
 
-                            info!("Received ACK for chunk {} of file {} from peer {}",
-                                  ack.chunk_index, ack.file_hash, peer_id);
+                            info!("✅ Received ACK for chunk {} of file {} from peer {} (pending: {})",
+                                  ack.chunk_index, 
+                                  ack.file_hash, 
+                                  peer_id,
+                                  connection.pending_acks.get(&ack.file_hash).copied().unwrap_or(0));
+                        } else {
+                            warn!("Received ACK for unknown peer: {}", peer_id);
                         }
                     }
+                }
+            }
+            
+            // If WebRTCMessage parsing failed, try parsing as direct types (fallback)
+            if !handled {
+                // Try to parse as FileChunk (for backward compatibility)
+                if let Ok(chunk) = serde_json::from_str::<FileChunk>(text) {
+                    // Handle received chunk
+                    Self::process_incoming_chunk(
+                        &chunk,
+                        file_transfer_service,
+                        connections,
+                        event_tx,
+                        peer_id,
+                        keystore,
+                        &active_private_key,
+                        stream_auth,
+                        &app_handle,
+                        &bandwidth,
+                    )
+                    .await;
+                    let _ = event_tx
+                        .send(WebRTCEvent::FileChunkReceived {
+                            peer_id: peer_id.to_string(),
+                            chunk,
+                        })
+                        .await;
+                }
+                // Try to parse as WebRTCFileRequest (for backward compatibility)
+                else if let Ok(request) = serde_json::from_str::<WebRTCFileRequest>(text) {
+                    let _ = event_tx
+                        .send(WebRTCEvent::FileRequestReceived {
+                            peer_id: peer_id.to_string(),
+                            request: request.clone(),
+                        })
+                        .await;
+                    // Actually handle the file request to start transfer
+                    Self::handle_file_request(
+                        peer_id,
+                        &request,
+                        event_tx,
+                        file_transfer_service,
+                        connections,
+                        keystore,
+                        stream_auth,
+                        &bandwidth,
+                    )
+                    .await;
+                } else {
+                    warn!("Failed to parse WebRTC message from peer {}: {}", peer_id, text);
                 }
             }
         }
