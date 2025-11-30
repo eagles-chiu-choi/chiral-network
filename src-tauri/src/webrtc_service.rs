@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tauri::Emitter;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
