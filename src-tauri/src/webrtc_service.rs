@@ -15,9 +15,12 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{error, info, warn};
 use tauri::Emitter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -108,8 +111,8 @@ pub struct PeerConnection {
     pub last_activity: Instant,
     pub peer_connection: Option<Arc<RTCPeerConnection>>,
     pub data_channel: Option<Arc<RTCDataChannel>>,
-    pub pending_chunks: HashMap<String, Vec<FileChunk>>, // file_hash -> chunks
-    pub received_chunks: HashMap<String, HashMap<u32, FileChunk>>, // file_hash -> chunk_index -> chunk
+    // pub pending_chunks: HashMap<String, Vec<FileChunk>>, // Removed in favor of direct write
+    pub received_chunks: HashMap<String, HashSet<u32>>, // file_hash -> set of chunk indices
     pub acked_chunks: HashMap<String, std::collections::HashSet<u32>>, // file_hash -> acked chunk indices
     pub pending_acks: HashMap<String, u32>, // file_hash -> number of unacked chunks
 }
@@ -564,7 +567,6 @@ impl WebRTCService {
             last_activity: Instant::now(),
             peer_connection: Some(peer_connection),
             data_channel: Some(data_channel),
-            pending_chunks: HashMap::new(),
             received_chunks: HashMap::new(),
             acked_chunks: HashMap::new(),
             pending_acks: HashMap::new(),
@@ -1381,42 +1383,70 @@ impl WebRTCService {
 
         let mut conns = connections.lock().await;
         if let Some(connection) = conns.get_mut(peer_id) {
-            // Store chunk
+            // 3. Write chunk directly to temp file
+            let temp_dir = std::env::temp_dir();
+            let temp_file_path = temp_dir.join(format!("chiral_part_{}_{}", chunk.file_hash, peer_id));
+
+            let write_result = async {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&temp_file_path)
+                    .await
+                    .map_err(|e| format!("Failed to open temp file: {}", e))?;
+
+                file.seek(std::io::SeekFrom::Start((chunk.chunk_index as u64) * (CHUNK_SIZE as u64)))
+                    .await
+                    .map_err(|e| format!("Failed to seek: {}", e))?;
+
+                file.write_all(&final_chunk_data)
+                    .await
+                    .map_err(|e| format!("Failed to write chunk: {}", e))?;
+                
+                Ok::<(), String>(())
+            }.await;
+
+            if let Err(e) = write_result {
+                error!("Failed to write chunk to disk: {}", e);
+                return;
+            }
+
+            // Store chunk index
             let chunks = connection
                 .received_chunks
                 .entry(chunk.file_hash.clone())
-                .or_insert_with(HashMap::new);
-            chunks.insert(chunk.chunk_index, chunk.clone());
+                .or_insert_with(HashSet::new);
+            chunks.insert(chunk.chunk_index);
 
             // Emit progress to frontend
-            if let Some(total_chunks) = chunks.values().next().map(|c| c.total_chunks) {
-                let progress_percentage = (chunks.len() as f32 / total_chunks as f32) * 100.0;
-                let bytes_received = chunks.len() as u64 * CHUNK_SIZE as u64;
-                let estimated_total_size = total_chunks as u64 * CHUNK_SIZE as u64;
+            let total_chunks = chunk.total_chunks;
+            let progress_percentage = (chunks.len() as f32 / total_chunks as f32) * 100.0;
+            let bytes_received = chunks.len() as u64 * CHUNK_SIZE as u64;
+            let estimated_total_size = total_chunks as u64 * CHUNK_SIZE as u64;
 
-                if let Err(e) = app_handle.emit("webrtc_download_progress", serde_json::json!({
-                    "fileHash": chunk.file_hash,
-                    "progress": progress_percentage,
-                    "chunksReceived": chunks.len(),
-                    "totalChunks": total_chunks,
-                    "bytesReceived": bytes_received,
-                    "totalBytes": estimated_total_size,
-                })) {
-                    warn!("Failed to emit progress event: {}", e);
-                }
+            if let Err(e) = app_handle.emit("webrtc_download_progress", serde_json::json!({
+                "fileHash": chunk.file_hash,
+                "progress": progress_percentage,
+                "chunksReceived": chunks.len(),
+                "totalChunks": total_chunks,
+                "bytesReceived": bytes_received,
+                "totalBytes": estimated_total_size,
+            })) {
+                warn!("Failed to emit progress event: {}", e);
+            }
 
-                if chunks.len() == total_chunks as usize {
-                    // Assemble file
-                    Self::assemble_file_from_chunks(
-                        &chunk.file_hash,
-                        chunks,
-                        file_transfer_service,
-                        event_tx,
-                        peer_id,
-                        &app_handle,
-                    )
-                    .await;
-                }
+            if chunks.len() == total_chunks as usize {
+                // Finalize download
+                Self::finalize_download(
+                    &chunk.file_hash,
+                    temp_file_path,
+                    file_transfer_service,
+                    event_tx,
+                    peer_id,
+                    &app_handle,
+                    estimated_total_size,
+                )
+                .await;
             }
         }
 
@@ -1434,43 +1464,54 @@ impl WebRTCService {
         }
     }
 
-    async fn assemble_file_from_chunks(
+    async fn finalize_download(
         file_hash: &str,
-        chunks: &HashMap<u32, FileChunk>,
+        temp_path: PathBuf,
         file_transfer_service: &Arc<FileTransferService>,
         event_tx: &mpsc::Sender<WebRTCEvent>,
         peer_id: &str,
         app_handle: &tauri::AppHandle,
+        file_size: u64,
     ) {
-        // Sort chunks by index
-        let mut sorted_chunks: Vec<_> = chunks.values().collect();
-        sorted_chunks.sort_by_key(|c| c.chunk_index);
+        let storage_dir = file_transfer_service.get_storage_dir_path();
+        let file_name = format!("downloaded_{}", file_hash); // Simplified name
+        let final_path = storage_dir.join(file_hash); // Use hash as filename in storage
 
-        // Get file name from the first chunk
-        let file_name = sorted_chunks
-            .first()
-            .map(|c| c.file_hash.clone())
-            .unwrap_or_else(|| format!("downloaded_{}", file_hash));
-
-        // Concatenate chunk data
-        let mut file_data = Vec::new();
-        for chunk in sorted_chunks {
-            file_data.extend_from_slice(&chunk.data);
+        // Rename temp file to final destination
+        if let Err(e) = tokio::fs::rename(&temp_path, &final_path).await {
+            error!("Failed to move file to storage: {}", e);
+            let _ = event_tx
+                .send(WebRTCEvent::TransferFailed {
+                    peer_id: peer_id.to_string(),
+                    file_hash: file_hash.to_string(),
+                    error: format!("Failed to move file to storage: {}", e),
+                })
+                .await;
+            return;
         }
 
-        let file_size = file_data.len();
+        // Create metadata
+        let metadata = serde_json::json!({
+            "file_name": file_name,
+            "file_size": file_size,
+            "uploaded_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            "is_encrypted": false, // Assuming decrypted for now
+        });
+        
+        let metadata_path = storage_dir.join(format!("{}.meta", file_hash));
+        if let Err(e) = tokio::fs::write(&metadata_path, serde_json::to_string(&metadata).unwrap()).await {
+             warn!("Failed to write metadata: {}", e);
+        }
 
-        // Store the assembled file internally
-        file_transfer_service
-            .store_file_data(file_hash.to_string(), file_name.clone(), file_data.clone())
-            .await;
-
-        // Emit event to frontend with complete file data
+        // Emit event to frontend
         if let Err(e) = app_handle.emit("webrtc_download_complete", serde_json::json!({
             "fileHash": file_hash,
             "fileName": file_name,
             "fileSize": file_size,
-            "data": file_data, // Send the actual file data
+            "path": final_path.to_string_lossy(), // Send path instead of data
         })) {
             error!("Failed to emit webrtc_download_complete event: {}", e);
         }
@@ -1481,6 +1522,8 @@ impl WebRTCService {
                 file_hash: file_hash.to_string(),
             })
             .await;
+        
+        info!("File download finalized: {}", final_path.display());
     }
 
     fn calculate_chunk_checksum(data: &[u8]) -> String {
@@ -1655,7 +1698,6 @@ impl WebRTCService {
             last_activity: Instant::now(),
             peer_connection: Some(peer_connection.clone()),
             data_channel: Some(data_channel),
-            pending_chunks: HashMap::new(),
             received_chunks: HashMap::new(),
             acked_chunks: HashMap::new(),
             pending_acks: HashMap::new(),
@@ -1856,7 +1898,6 @@ impl WebRTCService {
             last_activity: Instant::now(),
             peer_connection: Some(peer_connection.clone()),
             data_channel: None, // Will be set when received via on_data_channel
-            pending_chunks: HashMap::new(),
             received_chunks: HashMap::new(),
             acked_chunks: HashMap::new(),
             pending_acks: HashMap::new(),

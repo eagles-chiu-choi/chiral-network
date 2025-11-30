@@ -163,6 +163,10 @@ pub struct FileTransferService {
 }
 
 impl FileTransferService {
+    pub fn get_storage_dir_path(&self) -> PathBuf {
+        self.storage_dir.clone()
+    }
+
     fn backoff_delay(attempt: u32) -> Duration {
         if attempt <= 1 {
             return Duration::from_millis(0);
