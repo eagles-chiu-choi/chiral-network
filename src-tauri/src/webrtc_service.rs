@@ -1655,9 +1655,20 @@ impl WebRTCService {
 
             Box::pin(async move {
                 if let Some(candidate) = candidate {
-                    info!("🧊 ICE candidate generated for peer {}: {}", peer_id, candidate.address);
+                    // Log candidate type for debugging same-NAT scenarios
+                    let candidate_json = candidate.to_json().unwrap_or_default();
+                    let cand_str = &candidate_json.candidate;
+                    
+                    if cand_str.contains("typ host") {
+                        info!("🌐 Local network ICE candidate for peer {}: {}", peer_id, cand_str);
+                    } else if cand_str.contains("typ srflx") {
+                        info!("🌍 STUN-reflexive ICE candidate for peer {}: {}", peer_id, cand_str);
+                    } else {
+                        info!("🧊 ICE candidate generated for peer {}: {}", peer_id, cand_str);
+                    }
+
                     if let Ok(candidate_str) =
-                        serde_json::to_string(&candidate.to_json().unwrap_or_default())
+                        serde_json::to_string(&candidate_json)
                     {
                         let _ = event_tx
                             .send(WebRTCEvent::IceCandidate {
@@ -1680,19 +1691,18 @@ impl WebRTCService {
 
                 Box::pin(async move {
                     match state {
+                        RTCPeerConnectionState::New => info!("WebRTC connection state: NEW for peer {}", peer_id),
+                        RTCPeerConnectionState::Connecting => info!("WebRTC connection state: CONNECTING for peer {}", peer_id),
                         RTCPeerConnectionState::Connected => {
-                            info!("WebRTC connection established with peer: {}", peer_id);
+                            info!("✅ WebRTC connection ESTABLISHED with peer: {}", peer_id);
                             let _ = event_tx
                                 .send(WebRTCEvent::ConnectionEstablished { peer_id })
                                 .await;
                         }
-                        RTCPeerConnectionState::Failed => {
-                            error!("WebRTC connection failed for peer: {}", peer_id);
-                        }
-                        RTCPeerConnectionState::Disconnected | RTCPeerConnectionState::Closed => {
-                            info!("WebRTC connection closed with peer: {}", peer_id);
-                        }
-                        _ => {}
+                        RTCPeerConnectionState::Disconnected => warn!("⚠️ WebRTC connection DISCONNECTED for peer: {}", peer_id),
+                        RTCPeerConnectionState::Failed => error!("❌ WebRTC connection FAILED for peer: {}", peer_id),
+                        RTCPeerConnectionState::Closed => info!("WebRTC connection CLOSED for peer: {}", peer_id),
+                        _ => info!("WebRTC connection state changed: {:?} for peer {}", state, peer_id),
                     }
                 })
             },
@@ -1778,6 +1788,8 @@ impl WebRTCService {
         peer_id: String,
         offer: String,
     ) -> Result<String, String> {
+        info!("Handling incoming WebRTC offer from peer: {}", peer_id);
+        debug!("Incoming Offer SDP (truncated): {:.100}...", offer);
         // Create WebRTC API
         let api = APIBuilder::new().build();
 

@@ -3300,21 +3300,24 @@ async fn run_dht_node(
                                     RREvent::Message { peer, message } => match message {
                                         // WebRTC offer request
                                         Message::Request { request, channel, .. } => {
-                                            let WebRTCOfferRequest { offer_sdp, file_hash, requester_peer_id: _requester_peer_id } = request;
-                                            info!("Received WebRTC offer from {} for file {}", peer, file_hash);
+                                            let WebRTCOfferRequest { offer_sdp, file_hash, requester_peer_id } = request;
+                                            info!("📨 Received WebRTC offer from {} (requester_id: {}) for file {}", peer, requester_peer_id, file_hash);
+                                            debug!("Offer SDP (truncated): {:.100}...", offer_sdp);
 
                                             // Get WebRTC service to handle the offer
                                             if let Some(webrtc_service) = get_webrtc_service().await {
                                                 // Create WebRTC answer using the WebRTC service
+                                                info!("Creating WebRTC answer for peer {}...", peer);
                                                 match webrtc_service.establish_connection_with_offer(peer.to_string(), offer_sdp).await {
                                                     Ok(answer_sdp) => {
-                                                        info!("Created WebRTC answer for peer {}", peer);
+                                                        info!("✅ Created WebRTC answer for peer {}", peer);
+                                                        debug!("Answer SDP (truncated): {:.100}...", answer_sdp);
                                                         swarm.behaviour_mut().webrtc_signaling_rr
                                                             .send_response(channel, WebRTCAnswerResponse { answer_sdp })
                                                             .unwrap_or_else(|e| error!("send_response failed: {e:?}"));
                                                     }
                                                     Err(e) => {
-                                                        error!("Failed to create WebRTC answer for peer {}: {}", peer, e);
+                                                        error!("❌ Failed to create WebRTC answer for peer {}: {}", peer, e);
                                                         let error_answer = "error:failed-to-create-answer".to_string();
                                                         swarm.behaviour_mut().webrtc_signaling_rr
                                                             .send_response(channel, WebRTCAnswerResponse { answer_sdp: error_answer })
@@ -3322,7 +3325,7 @@ async fn run_dht_node(
                                                     }
                                                 }
                                             } else {
-                                                error!("WebRTC service not available for handling offer from peer {}", peer);
+                                                error!("❌ WebRTC service not available for handling offer from peer {}", peer);
                                                 let error_answer = "error:webrtc-service-unavailable".to_string();
                                                 swarm.behaviour_mut().webrtc_signaling_rr
                                                     .send_response(channel, WebRTCAnswerResponse { answer_sdp: error_answer })
@@ -3332,10 +3335,13 @@ async fn run_dht_node(
                                         // WebRTC answer response
                                         Message::Response { request_id, response } => {
                                             let WebRTCAnswerResponse { ref answer_sdp } = response;
-                                            info!("Received WebRTC answer: {}", answer_sdp);
+                                            info!("📨 Received WebRTC answer for request {:?}", request_id);
+                                            debug!("Answer SDP (truncated): {:.100}...", answer_sdp);
 
                                             if let Some(tx) = pending_webrtc_offers.lock().await.remove(&request_id) {
                                                 let _ = tx.send(Ok(response));
+                                            } else {
+                                                warn!("Received WebRTC answer for unknown or expired request_id: {:?}", request_id);
                                             }
                                         }
                                     },

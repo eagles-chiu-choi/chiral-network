@@ -764,14 +764,17 @@ impl MultiSourceDownloadService {
         }
 
         // Create WebRTC offer (existing WebRTC logic)
+        info!("Creating WebRTC offer for peer {}...", peer_id);
         match self.webrtc_service.create_offer(peer_id.clone()).await {
             Ok(offer) => {
+                info!("✅ WebRTC offer created for peer {}", peer_id);
                 let offer_request = WebRTCOfferRequest {
                     offer_sdp: offer,
                     file_hash: file_hash.to_string(),
                     requester_peer_id: self.dht_service.get_peer_id().await,
                 };
 
+                info!("Sending WebRTC offer to peer {} via DHT...", peer_id);
                 match timeout(
                     Duration::from_secs(CONNECTION_TIMEOUT_SECS),
                     self.dht_service
@@ -780,6 +783,7 @@ impl MultiSourceDownloadService {
                 .await
                 {
                     Ok(Ok(answer_receiver)) => {
+                        info!("WebRTC offer sent to {}, waiting for answer...", peer_id);
                         match timeout(
                             Duration::from_secs(CONNECTION_TIMEOUT_SECS),
                             answer_receiver,
@@ -787,6 +791,7 @@ impl MultiSourceDownloadService {
                         .await
                         {
                             Ok(Ok(Ok(answer_response))) => {
+                                info!("📨 Received WebRTC answer from peer {}", peer_id);
                                 match self
                                     .webrtc_service
                                     .establish_connection_with_answer(
@@ -796,6 +801,7 @@ impl MultiSourceDownloadService {
                                     .await
                                 {
                                     Ok(_) => {
+                                        info!("✅ WebRTC connection established with answer for peer {}", peer_id);
                                         self.on_source_connected(file_hash, &peer_id, chunk_ids)
                                             .await;
                                         Ok(())
