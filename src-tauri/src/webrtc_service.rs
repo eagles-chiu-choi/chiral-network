@@ -1978,18 +1978,21 @@ impl WebRTCService {
             // Set up message handler for received data channel
             let peer_id_for_log = peer_id_for_dc.clone();
             let data_channel_id = format!("{:p}", data_channel.as_ref());
+            let data_channel_for_state = data_channel.clone();
             data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
-                info!("📨 [SEEDER] Data channel message received from peer {} (length: {} bytes, channel_id: {})", peer_id_for_log, msg.data.len(), data_channel_id);
+                use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+                let current_state = data_channel_for_state.ready_state();
+                info!("📨 [SEEDER] Data channel message received from peer {} (length: {} bytes, channel_id: {}, state: {:?})", peer_id_for_log, msg.data.len(), data_channel_id, current_state);
                 
                 // Log message preview
-                let preview_len = msg.data.len().min(100);
-                let preview = String::from_utf8_lossy(&msg.data[..preview_len]);
+                let preview_len = msg.data.len().min(200);
+                let preview = String::from_utf8_lossy(&msg.data[..preview_len.min(msg.data.len())]);
                 info!("📄 [SEEDER MESSAGE PREVIEW] First {} bytes: {}", preview_len, preview);
                 
                 // Check if it looks like a ChunkAck
                 if let Ok(text) = std::str::from_utf8(&msg.data) {
-                    if text.contains("\"ChunkAck\"") || text.contains("chunk_index") {
-                        info!("🎯 [SEEDER] Message appears to be a ChunkAck based on content preview");
+                    if text.contains("\"chunkAck\"") || text.contains("\"ChunkAck\"") || text.contains("chunk_index") || text.contains("chunkIndex") {
+                        info!("🎯 [SEEDER] Message appears to be a ChunkAck based on content preview: {}", &text[..text.len().min(200)]);
                     }
                 }
                 let event_tx = event_tx.clone();
