@@ -372,6 +372,26 @@ import {
           ));
         });
 
+        // Listen for WebRTC transfer failures
+        const unlistenWebRTCFailed = await listen('webrtc_transfer_failed', (event) => {
+          const data = event.payload as {
+            fileHash: string;
+            error: string;
+          };
+          
+          files.update(f => f.map(file =>
+            file.hash === data.fileHash
+              ? { ...file, status: 'failed' }
+              : file
+          ));
+          
+          showNotification(
+            `WebRTC download failed: ${data.error}`,
+            'error',
+            6000
+          );
+        });
+
         // Listen for WebRTC download completion
 const unlistenWebRTCComplete = await listen('webrtc_download_complete', async (event) => {
   const data = event.payload as {
@@ -468,6 +488,7 @@ const unlistenWebRTCComplete = await listen('webrtc_download_complete', async (e
           unlistenDhtError()
           unlistenWebRTCProgress()
           unlistenWebRTCComplete()
+          unlistenWebRTCFailed()
           unlistenTorrentEvent()
         }
       } catch (error) {
@@ -1379,35 +1400,66 @@ async function loadAndResumeDownloads() {
 
         // Call backend Rust WebRTC via Tauri command
         // This uses the WebRTCService with webrtc-rs crate (works in Tauri)
-        await invoke('download_file_from_network', {
-          fileHash: downloadingFile.hash,
-          outputPath: outputPath
-        });
+        // Note: This may take up to 60 seconds for connection establishment
+        try {
+          await invoke('download_file_from_network', {
+            fileHash: downloadingFile.hash,
+            outputPath: outputPath
+          });
 
-        // Update file status to downloading (not completed - that happens via events)
-        files.update(f => f.map(file =>
-          file.id === downloadingFile.id
-            ? {
-                ...file,
-                status: 'downloading',
-                progress: 0,
-                downloadPath: outputPath
-              }
-            : file
-        ));
+          // Update file status to downloading (not completed - that happens via events)
+          files.update(f => f.map(file =>
+            file.id === downloadingFile.id
+              ? {
+                  ...file,
+                  status: 'downloading',
+                  progress: 0,
+                  downloadPath: outputPath
+                }
+              : file
+          ));
 
-        diagnosticLogger.debug('Download', 'WebRTC download initiated', { outputPath });
-        showNotification(`WebRTC download started for "${downloadingFile.name}"`, 'info');
-
+          diagnosticLogger.debug('Download', 'WebRTC download initiated', { outputPath });
+          showNotification(`WebRTC download started for "${downloadingFile.name}"`, 'info');
+        } catch (error) {
+          // Only show error if it's not a timeout (timeout means connection is still trying)
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          if (!errorMsg.includes('timeout') && !errorMsg.includes('Timeout')) {
+            errorLogger.fileOperationError('WebRTC download', errorMsg);
+            files.update(f => f.map(file =>
+              file.id === downloadingFile.id
+                ? { ...file, status: 'failed' }
+                : file
+            ));
+            showNotification(
+              `WebRTC download failed: ${errorMsg}`,
+              'error',
+              6000
+            );
+          } else {
+            // Timeout - connection might still be establishing, let events handle it
+            files.update(f => f.map(file =>
+              file.id === downloadingFile.id
+                ? {
+                    ...file,
+                    status: 'downloading',
+                    progress: 0,
+                    downloadPath: outputPath
+                  }
+                : file
+            ));
+            showNotification(`Connecting to peer for "${downloadingFile.name}"...`, 'info', 5000);
+          }
+        }
       } catch (error) {
-        errorLogger.fileOperationError('WebRTC download', error instanceof Error ? error.message : String(error));
+        errorLogger.fileOperationError('WebRTC download setup', error instanceof Error ? error.message : String(error));
         files.update(f => f.map(file =>
           file.id === downloadingFile.id
             ? { ...file, status: 'failed' }
             : file
         ));
         showNotification(
-          `WebRTC download failed: ${error instanceof Error ? error.message : String(error)}`,
+          `WebRTC download setup failed: ${error instanceof Error ? error.message : String(error)}`,
           'error',
           6000
         );

@@ -1513,13 +1513,19 @@ impl WebRTCService {
         // Rename temp file to final destination
         if let Err(e) = tokio::fs::rename(&temp_path, &final_path).await {
             error!("Failed to move file to storage: {}", e);
+            let error_msg = format!("Failed to move file to storage: {}", e);
             let _ = event_tx
                 .send(WebRTCEvent::TransferFailed {
                     peer_id: peer_id.to_string(),
                     file_hash: file_hash.to_string(),
-                    error: format!("Failed to move file to storage: {}", e),
+                    error: error_msg.clone(),
                 })
                 .await;
+            // Emit to frontend
+            let _ = app_handle.emit("webrtc_transfer_failed", serde_json::json!({
+                "fileHash": file_hash,
+                "error": error_msg,
+            }));
             return;
         }
 

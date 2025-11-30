@@ -4138,7 +4138,7 @@ async fn download_file_from_network(
 
                                         // Wait for WebRTC answer with timeout
                                         match tokio::time::timeout(
-                                            Duration::from_secs(30),
+                                            Duration::from_secs(60), // Increased from 30 to 60 seconds
                                             answer_receiver,
                                         )
                                         .await
