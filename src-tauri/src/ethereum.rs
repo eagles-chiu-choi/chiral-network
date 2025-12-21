@@ -96,6 +96,13 @@ impl GethProcess {
         GethProcess { child: None }
     }
 
+    /// Returns true if this process was started and is managed by this app instance.
+    /// Note: `is_running()` may return true even when unmanaged (e.g., SSH port-forward to a remote RPC),
+    /// because it also checks whether 127.0.0.1:8545 is reachable.
+    pub fn is_managed(&self) -> bool {
+        self.child.is_some()
+    }
+
     pub fn is_running(&self) -> bool {
         // First check if we have a tracked child process
         if self.child.is_some() {
