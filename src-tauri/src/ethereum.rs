@@ -1,4 +1,4 @@
-use chiral_network::config::{CHAIN_ID, NETWORK_ID};
+use crate::config::{CHAIN_ID, NETWORK_ID};
 use chrono;
 use ethers::prelude::*;
 use once_cell::sync::Lazy;
@@ -12,8 +12,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::net::TcpStream;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tauri::Emitter;
+use url::Url;
 
 // ============================================================================
 // Configuration & Shared Resources
@@ -98,7 +101,7 @@ impl GethProcess {
 
     /// Returns true if this process was started and is managed by this app instance.
     /// Note: `is_running()` may return true even when unmanaged (e.g., SSH port-forward to a remote RPC),
-    /// because it also checks whether 127.0.0.1:8545 is reachable.
+    /// because it checks whether the configured RPC endpoint is reachable.
     pub fn is_managed(&self) -> bool {
         self.child.is_some()
     }
@@ -109,39 +112,21 @@ impl GethProcess {
             return true;
         }
 
-        // Check if geth is actually running by trying an RPC call
-        // This is more reliable than just checking if port 8545 is listening
-        use std::net::TcpStream;
-        use std::time::Duration;
-
-        // First check if port is listening (quick check)
-        let port_open = TcpStream::connect_timeout(
-            &"127.0.0.1:8545".parse().unwrap(),
-            Duration::from_millis(500)
-        ).is_ok();
-
-        if !port_open {
+        // IMPORTANT:
+        // This method is called from async contexts (tauri commands / startup tasks).
+        // Using `reqwest::blocking` here can panic ("Cannot drop a runtime...") because it creates
+        // an internal runtime that gets dropped on a tokio worker thread. So we keep this check
+        // lightweight and runtime-free: parse the URL and do a TCP connect.
+        let Ok(url) = Url::parse(&NETWORK_CONFIG.rpc_endpoint) else {
             return false;
-        }
-
-        // Port is open, now verify it's actually Geth responding correctly
-        // Try a simple RPC call with a short timeout
-        match std::process::Command::new("curl")
-            .args([
-                "-s",
-                "-m", "1",  // 1 second timeout
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "--data", r#"{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":1}"#,
-                "http://127.0.0.1:8545"
-            ])
-            .output()
-        {
-            Ok(output) => {
-                // Check if we got a valid JSON-RPC response
-                let response = String::from_utf8_lossy(&output.stdout);
-                response.contains("\"jsonrpc\"") && response.contains("\"result\"")
-            }
+        };
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let port = url.port_or_known_default().unwrap_or(8545);
+        let addr = format!("{host}:{port}");
+        match addr.parse() {
+            Ok(sock_addr) => TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)).is_ok(),
             Err(_) => false,
         }
     }
