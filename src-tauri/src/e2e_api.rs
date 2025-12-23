@@ -495,17 +495,6 @@ async fn api_download(
         .into_response();
     };
 
-    let seeder_url = req
-        .seeder_url
-        .or_else(|| meta.http_sources.as_ref().and_then(|v| v.first()).map(|s| s.url.clone()))
-        .ok_or_else(|| "No httpSources in metadata".to_string());
-    let seeder_url = match seeder_url {
-        Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(crate::http_server::ErrorResponse { error: e })).into_response();
-        }
-    };
-
     let out_name = req.file_name.unwrap_or_else(|| meta.file_name.clone());
     let protocol_upper = req
         .protocol
@@ -513,6 +502,22 @@ async fn api_download(
         .unwrap_or("HTTP")
         .trim()
         .to_uppercase();
+
+    // Only HTTP downloads require an HTTP seeder URL / httpSources.
+    let seeder_url = if protocol_upper == "HTTP" {
+        let seeder_url = req
+            .seeder_url
+            .or_else(|| meta.http_sources.as_ref().and_then(|v| v.first()).map(|s| s.url.clone()))
+            .ok_or_else(|| "No httpSources in metadata".to_string());
+        match seeder_url {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(crate::http_server::ErrorResponse { error: e })).into_response();
+            }
+        }
+    } else {
+        None
+    };
 
     // Use a stable downloads dir under temp for E2E.
     let downloads_dir = std::env::temp_dir().join("chiral-e2e-downloads");
@@ -524,7 +529,7 @@ async fn api_download(
         let peer_id = Some(dht.get_peer_id().await);
         let client = HttpDownloadClient::new_with_peer_id(peer_id);
         if let Err(e) = client
-            .download_file(&seeder_url, &meta.merkle_root, &output_path, None)
+            .download_file(seeder_url.as_ref().unwrap(), &meta.merkle_root, &output_path, None)
             .await
         {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::http_server::ErrorResponse { error: e })).into_response();
