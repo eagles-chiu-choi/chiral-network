@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { settings } from '$lib/stores';
   import type { AppSettings } from '$lib/stores';
@@ -11,6 +11,7 @@
   import Label from '$lib/components/ui/label.svelte';
   import RelayErrorMonitor from '$lib/components/RelayErrorMonitor.svelte';
   import { Wifi, WifiOff, Server, Settings as SettingsIcon, RefreshCw } from 'lucide-svelte';
+  import { showToast } from '$lib/toast';
 
   // Relay server status
   let relayServerEnabled = false;

@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import type { PaymentCheckpointEvent } from '$lib/services/paymentCheckpointService';
   import Modal from '$lib/components/Modal.svelte';
-  import { wallet, settings } from '$lib/stores';
+  import { wallet } from '$lib/stores';
   import { paymentService } from '$lib/services/paymentService';
 
   export let checkpointEvent: PaymentCheckpointEvent | null = null;
@@ -19,8 +19,7 @@
   let error: string = '';
   let paymentMode: 'incremental' | 'remaining' | 'upfront' = 'incremental';
 
-  $: currentBalance = $wallet?.balance || 0;
-  $: availableBalance = $wallet?.availableBalance || 0;
+  $: availableBalance = $wallet?.balance || 0;
 
   $: incrementalAmount = checkpointEvent?.amountChiral || 0;
   $: canAffordIncremental = availableBalance >= incrementalAmount;
@@ -115,7 +114,7 @@
   }
 </script>
 
-<Modal bind:show onClose={handleClose}>
+<Modal showModal={show} on:close={handleClose}>
   <div class="p-6 space-y-4">
     <!-- Header -->
     <div class="flex items-center justify-between">
@@ -155,6 +154,12 @@
             ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
             : 'border-gray-300 dark:border-gray-600 hover:border-gray-400'}"
           onclick={() => (paymentMode = 'incremental')}
+          on:keydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              paymentMode = 'incremental';
+            }
+          }}
           role="button"
           tabindex="0"
         >
@@ -182,6 +187,12 @@
             ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
             : 'border-gray-300 dark:border-gray-600 hover:border-gray-400'}"
           onclick={() => (paymentMode = 'remaining')}
+          on:keydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              paymentMode = 'remaining';
+            }
+          }}
           role="button"
           tabindex="0"
         >
