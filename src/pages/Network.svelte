@@ -10,7 +10,7 @@
   import { peers, networkStats, userLocation, settings, wallet } from '$lib/stores'
   import type { AppSettings } from '$lib/stores'
   import { normalizeRegion, UNKNOWN_REGION_ID } from '$lib/geo'
-  import { Users, HardDrive, Activity, RefreshCw, UserPlus, Signal, Server, Square, Play, Download, AlertCircle, LayoutDashboard, Network, FileText, Wifi } from 'lucide-svelte'
+  import { Users, HardDrive, Activity, RefreshCw, UserPlus, Signal, Server, Square, Play, Download, AlertCircle, LayoutDashboard, Network, FileText } from 'lucide-svelte'
   import { onMount, onDestroy } from 'svelte'
   import { get } from 'svelte/store'
   import { invoke } from '@tauri-apps/api/core'
@@ -164,24 +164,7 @@
     })
   }
   
-  // UI variables
-  let copiedPeerId = false
-  let copiedBootstrap = false
-  let copiedListenAddr: string | null = null
-  let publicMultiaddrs: string[] = []
-
-  // Fetch public multiaddresses (non-loopback)
-  /*
-  async function fetchPublicMultiaddrs() {
-    try {
-      const addrs = await invoke<string[]>('get_multiaddresses')
-      publicMultiaddrs = addrs
-    } catch (e) {
-      errorLogger.networkError(`Failed to get multiaddresses: ${e instanceof Error ? e.message : String(e)}`);
-      publicMultiaddrs = []
-    }
-  }
-  */
+  // UI variables (removed unused clipboard flags)
 
   function formatSize(bytes: number | undefined): string {
     if (bytes === undefined || bytes === null || isNaN(bytes)) {
@@ -198,15 +181,6 @@
     }
 
     return `${size.toFixed(2)} ${units[unitIndex]}`
-  }
-
-  function formatHealthTimestamp(epoch: number | null): string {
-    if (!epoch) return tr('network.dht.health.never')
-    return new Date(epoch * 1000).toLocaleString()
-  }
-
-  function formatHealthMessage(value: string | null): string {
-    return value ?? tr('network.dht.health.none')
   }
 
   function formatPeerDate(date: Date | string | number | null | undefined): string {

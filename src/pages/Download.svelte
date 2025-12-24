@@ -70,6 +70,7 @@
         seederAddresses: [],
         downloadedChunks: [],
         totalChunks: 0,
+        price: 0,
         protocol: 'BitTorrent' as const,
         downloadStartTime: existingIndex >= 0 ? f[existingIndex].downloadStartTime : Date.now()
       };
@@ -99,6 +100,7 @@
       seederAddresses: [],
       downloadedChunks: [],
       totalChunks: 0,
+      price: 0,
       protocol: 'BitTorrent' as const,
       downloadStartTime: Date.now()
     };
